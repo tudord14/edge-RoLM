@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+
+models/
+*.gguf
+*.bin
+*.pt
+*.onnx
+*.npy
+dataset.txt
+data/
+release_assets/
