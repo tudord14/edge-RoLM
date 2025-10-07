@@ -46,12 +46,9 @@ for i in $(seq 1 60); do
   [[ $i -eq 60 ]] && { echo "[ERROR] Ollama did not become ready."; exit 1; }
 done
 
-# ---------- Prompt ----------
-# (UNCHANGED paragraph text; we only change how much of it we slice per ctx.)
+# ---------- Prompt text (we slice below) ----------
 BASE_PAR="Intr-o seara ma intorceam de la munca si am vazut pe strada un catel ud care se adapostea sub un chiosc inchis. Ploua marunt, iar luminile din vitrine se reflectau in balti, facand orasul sa para un film vechi. M-am oprit, am scos din rucsac o punga goala si am rupt un colt de paine pe care il pastrasem de la pranz. Catelul a ezitat, apoi s-a apropiat cu coada intre picioare, dar ochii ii scanteiau de curiozitate. In departare se auzea tramvaiul, iar pe trotuar treceau oameni cu pas grabit, neobservand micul spectacol al increderii care incerca sa se nasca intre doi straini. Mi-am pus haina pe umeri ca pe o manta improvizata si m-am aplecat. In clipa aceea, cineva a strigat din spatele meu ca ar fi mai bine sa nu ating animalul, ca poate musca. Dar vocea aceea parea mai mult o teama veche decat un avertisment. Catelul a luat firimiturile si s-a asezat la un pas, urmarindu-ma cu atentie. I-am intins palma goala, iar el, dupa cateva clipe, a mirosit-o si a tresarit, ca si cum si-ar fi amintit ca lumea poate fi blanda. Am zambit singur si mi-am dat seama ca nu eram grabit nicaieri, desi ceasul trecuse de noua. Am pornit incet spre casa, iar el m-a urmat la distanta, oprindu-se la fiecare colt ca sa se asigure ca nu il chem intr-o capcana. Cand am ajuns la bloc, s-a asezat la scari, privind spre geamurile intunecate ca si cum ar fi citit povesti nespuse. I-am lasat un castron improvizat din capacul cutiei mele de pranz si am turnat apa din sticla. In camera mea modesta, am aprins o veioza si m-am gandit la drumul pe care il parcurge uneori increderea: incepe cu o ezitare, continua cu o firimitura, se leaga de un pas comun si se odihneste langa o usa care poate candva se va deschide."
 
-# MINIMAL CHANGE 1:
-# Jetson-style fixed small char budgets per context (keeps prompt_eval_count relatively small/flat).
 make_prompt () {
   local ctx="$1" n_chars
   case "$ctx" in
@@ -95,13 +92,11 @@ read_cpu_temp_once () {
 
 # ---------- Warmup ----------
 echo "[INFO] Warming up models…"
-# existing short warmup at 512 (UNCHANGED)
 for m in "${MODELS[@]}"; do
   curl -sS --connect-timeout 3 --max-time 5 "$HOST/api/generate" \
     -H "Content-Type: application/json" \
     -d '{"model":"'"$m"'","prompt":"warmup","stream":false,"options":{"num_ctx":512,"num_predict":4,"num_thread":2}}' >/dev/null || true
 done
-# MINIMAL CHANGE 2: add a 4k-context warmup to mirror Jetson behavior
 for m in "${MODELS[@]}"; do
   curl -sS --connect-timeout 5 --max-time 8 "$HOST/api/generate" \
     -H "Content-Type: application/json" \
@@ -113,18 +108,21 @@ echo "[INFO] Warmup done."
 for model in "${MODELS[@]}"; do
   for th in "${THREADS[@]}"; do
     for ctx in "${CTX[@]}"; do
-      P="$(make_prompt "$ctx")"
-      P_JSON=$(jq -Rs . <<<"$P")
+      base_prompt="$(make_prompt "$ctx")"
       for pred in "${PRED[@]}"; do
         for rep in $(seq 1 "$REPS"); do
-          echo "[RUN] model=${model} rep=${rep} threads=${th} ctx=${ctx} pred=${pred}"
+          # --------- CACHE OFF: unique stamp + unique system string ----------
+          STAMP=" [bench ${HOSTNAME} ${model} th=${th} ctx=${ctx} pred=${pred} rep=${rep} @$(date +%s%N)] "
+          P_JSON=$(jq -Rs . <<<"$STAMP$base_prompt")
+          SYS_JSON=$(jq -Rs . <<<"bench-$HOSTNAME th=$th ctx=$ctx pred=$pred rep=$rep $(date +%s%N)")
+          echo "[RUN] model=${model} rep=${rep} threads=${th} ctx=${ctx} pred=${pred} (cache=OFF stamp=$(printf '%s' "$STAMP" | sha1sum | cut -c1-12))"
 
           RESP_TMP=$(mktemp /tmp/ollama_resp_XXXXXX.jsonl)
           t0=$(date +%s.%N)
 
-          curl -sS --http1.1 --no-buffer --connect-timeout 10 \
+          curl -sS --http1.1 --no-buffer --connect-timeout 10 --max-time 240 \
             "$HOST/api/generate" -H "Content-Type: application/json" \
-            -d '{"model":"'"$model"'","prompt":'"$P_JSON"',"stream":true,"options":{"num_ctx":'"$ctx"',"num_predict":'"$pred"',"num_thread":'"$th"',"temperature":0.7,"top_p":0.9}}' \
+            -d '{"model":"'"$model"'","system":'"$SYS_JSON"',"prompt":'"$P_JSON"',"stream":true,"options":{"num_ctx":'"$ctx"',"num_predict":'"$pred"',"num_thread":'"$th"',"temperature":0.7,"top_p":0.9}}' \
           | awk -v T0="$t0" '
               BEGIN{ gotfirst=0 }
               {
