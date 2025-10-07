@@ -9,9 +9,6 @@ from dataclasses import dataclass
 from typing import List, Optional
 import argparse
 
-# --- Dependencies ---
-# pip install llama-cpp-python psutil numpy
-
 try:
     import psutil
 except Exception as e:
@@ -22,13 +19,11 @@ try:
 except Exception as e:
     print("llama-cpp-python is required: pip install llama-cpp-python", file=sys.stderr); raise
 
-# numpy optional (for percentiles)
 try:
     import numpy as np
     NUMPY_OK = True
 except Exception:
     NUMPY_OK = False
-
 
 def percentile(values: List[float], pct: float) -> float:
     if not values:
@@ -40,25 +35,15 @@ def percentile(values: List[float], pct: float) -> float:
     k = min(k, len(vals))
     return float(vals[k-1])
 
-
 def read_cpu_temp() -> Optional[float]:
-    """
-    Try vcgencmd (Raspberry Pi) first; otherwise try /sys thermal zones.
-    Returns temperature in Celsius or None if unavailable.
-    """
-    # vcgencmd
     try:
         out = subprocess.check_output(["vcgencmd", "measure_temp"], text=True).strip()
-        # output like: temp=45.0'C
         if "temp=" in out:
             val = out.split("temp=")[1].split("'")[0]
             return float(val)
     except Exception:
         pass
-
-    # /sys/class/thermal
     try:
-        # try CPU thermal zone first: often thermal_zone0
         candidates = ["/sys/class/thermal/thermal_zone0/temp",
                       "/sys/class/thermal/thermal_zone1/temp"]
         for p in candidates:
@@ -66,7 +51,6 @@ def read_cpu_temp() -> Optional[float]:
                 raw = open(p).read().strip()
                 if raw.isdigit():
                     return float(raw) / 1000.0
-                # sometimes already in °C
                 try:
                     return float(raw)
                 except Exception:
@@ -75,16 +59,13 @@ def read_cpu_temp() -> Optional[float]:
         pass
     return None
 
-
 def build_prompt_ids(llm: Llama, target_tokens: int) -> List[int]:
-    # Short Romanian seed, tiled to exact length
     seed = "Acesta este un prompt de test pentru evaluare. "
     seed_ids = llm.tokenize(seed.encode("utf-8"))
     toks: List[int] = []
     while len(toks) < target_tokens:
         toks.extend(seed_ids)
     return toks[:target_tokens]
-
 
 @dataclass
 class RunResult:
@@ -107,7 +88,6 @@ class RunResult:
     peak_rss_mb: float
     avg_cpu_temp_c: Optional[float]
     notes: str
-
 
 def run_benchmark(
     model_path: str,
@@ -150,7 +130,7 @@ def run_benchmark(
     prompt_time_s = time.time() - t0_prompt
     prompt_tps = (len(input_ids) / prompt_time_s) if prompt_time_s > 0 else 0.0
 
-    # Decode streaming (TTFT + per-token cadence)
+    # Decode streaming
     proc = psutil.Process(os.getpid())
     peak_rss_mb = proc.memory_info().rss / (1024 * 1024)
 
@@ -158,7 +138,6 @@ def run_benchmark(
     produced_tokens = 0
     ttft_ms = None
 
-    # sample CPU temp periodically (lightweight)
     temps = []
     last_temp_sample = 0.0
 
@@ -183,16 +162,12 @@ def run_benchmark(
         produced_tokens += 1
         if produced_tokens > 1:
             timings.append(dt)
-
-        # peak RSS
         try:
             rss = proc.memory_info().rss / (1024 * 1024)
             if rss > peak_rss_mb:
                 peak_rss_mb = rss
         except Exception:
             pass
-
-        # sample temp ~10 Hz max
         if now - last_temp_sample >= 0.1:
             t = read_cpu_temp()
             if t is not None:
@@ -234,7 +209,6 @@ def run_benchmark(
         notes=notes
     )
 
-
 def main():
     ap = argparse.ArgumentParser(description="Raspberry Pi edge metrics for GGUF models (llama.cpp).")
     ap.add_argument("--models", nargs="+", default=[
@@ -248,10 +222,12 @@ def main():
     ap.add_argument("--prompt_lens", nargs="+", type=int, default=[64, 256, 1024, 4096], help="Prompt lengths to test")
     ap.add_argument("--n_threads", type=int, default=max(1, (os.cpu_count() or 4) // 2), help="Threads for llama.cpp")
     ap.add_argument("--n_batch", type=int, default=256, help="Prompt KV batch size")
-    ap.add_argument("--reps", type=int, default=3, help="Repetitions per (model, prompt_len)")
-    ap.add_argument("--cooldown", type=float, default=2.0, help="Seconds to sleep between repetitions")
+    ap.add_argument("--reps", type=int, default=1, help="Repetitions per (model, prompt_len)")
+    ap.add_argument("--cooldown", type=float, default=1.0, help="Seconds to sleep between repetitions")
     ap.add_argument("--out_csv", default="edge_metrics_pi.csv", help="Output CSV")
     args = ap.parse_args()
+
+    print(f"[INFO] CSV output: {os.path.join(os.getcwd(), args.out_csv)}")
 
     header = [
         "hostname","model","quant","n_ctx","n_threads","n_batch",
@@ -269,10 +245,9 @@ def main():
 
         for mp in args.models:
             if not os.path.exists(mp):
-                print(f"[WARN] Model not found: {mp}")
+                print(f"[WARN] Model file not found: {mp}")
                 continue
 
-            # Smoke long-context load once at args.n_ctx
             try:
                 _ = Llama(model_path=mp, n_ctx=args.n_ctx, n_threads=max(1, (os.cpu_count() or 4)//2))
             except Exception as e:
@@ -280,21 +255,26 @@ def main():
             else:
                 print(f"[STRESS] {os.path.basename(mp)} @ n_ctx={args.n_ctx}: OK")
             finally:
-                # Free memory a bit between models
                 time.sleep(0.5)
 
             for pl in args.prompt_lens:
-                for _rep in range(args.reps):
-                    print(f"[RUN] {os.path.basename(mp)} | prompt={pl} | new={args.new_tokens} | "
+                for rep in range(1, args.reps + 1):
+                    print(f"[RUN] {os.path.basename(mp)} | rep={rep} | prompt={pl} | new={args.new_tokens} | "
                           f"threads={args.n_threads} | n_batch={args.n_batch}")
-                    res = run_benchmark(
-                        model_path=mp,
-                        prompt_len=pl,
-                        new_tokens=args.new_tokens,
-                        n_ctx=args.n_ctx,
-                        n_threads=args.n_threads,
-                        n_batch=args.n_batch,
-                    )
+                    try:
+                        res = run_benchmark(
+                            model_path=mp,
+                            prompt_len=pl,
+                            new_tokens=args.new_tokens,
+                            n_ctx=args.n_ctx,
+                            n_threads=args.n_threads,
+                            n_batch=args.n_batch,
+                        )
+                    except Exception as e:
+                        print(f"[WARN] benchmark failed: {e}")
+                        time.sleep(args.cooldown)
+                        continue
+
                     w.writerow([
                         res.hostname, res.model, res.quant, res.n_ctx, res.n_threads, res.n_batch,
                         res.prompt_tokens, res.new_tokens,
@@ -306,11 +286,15 @@ def main():
                         res.notes
                     ])
                     f.flush()
+
+                    print(f"   → tokens: prompt={res.prompt_tokens}, gen={res.new_tokens} | "
+                          f"TTFT={res.ttft_ms:.0f} ms | gen_tps_overall={res.decode_tps_overall:.2f} | "
+                          f"RSS={res.peak_rss_mb:.0f} MB | CPU≈{(res.avg_cpu_temp_c or 0):.1f}°C")
+
                     time.sleep(args.cooldown)
 
-    print(f"\nDone. Wrote results to {args.out_csv}")
+    print(f"\n[DONE] Wrote results to {args.out_csv}")
     print("Tip: tag results by hostname; aggregate across devices for your paper.")
-    
 
 if __name__ == "__main__":
     main()
