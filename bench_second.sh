@@ -46,16 +46,24 @@ for i in $(seq 1 60); do
   [[ $i -eq 60 ]] && { echo "[ERROR] Ollama did not become ready."; exit 1; }
 done
 
-# ---------- Prompt (repeat paragraph so prompt_eval_count ≈ ctx) ----------
+# ---------- Prompt ----------
+# (UNCHANGED paragraph text; we only change how much of it we slice per ctx.)
 BASE_PAR="Intr-o seara ma intorceam de la munca si am vazut pe strada un catel ud care se adapostea sub un chiosc inchis. Ploua marunt, iar luminile din vitrine se reflectau in balti, facand orasul sa para un film vechi. M-am oprit, am scos din rucsac o punga goala si am rupt un colt de paine pe care il pastrasem de la pranz. Catelul a ezitat, apoi s-a apropiat cu coada intre picioare, dar ochii ii scanteiau de curiozitate. In departare se auzea tramvaiul, iar pe trotuar treceau oameni cu pas grabit, neobservand micul spectacol al increderii care incerca sa se nasca intre doi straini. Mi-am pus haina pe umeri ca pe o manta improvizata si m-am aplecat. In clipa aceea, cineva a strigat din spatele meu ca ar fi mai bine sa nu ating animalul, ca poate musca. Dar vocea aceea parea mai mult o teama veche decat un avertisment. Catelul a luat firimiturile si s-a asezat la un pas, urmarindu-ma cu atentie. I-am intins palma goala, iar el, dupa cateva clipe, a mirosit-o si a tresarit, ca si cum si-ar fi amintit ca lumea poate fi blanda. Am zambit singur si mi-am dat seama ca nu eram grabit nicaieri, desi ceasul trecuse de noua. Am pornit incet spre casa, iar el m-a urmat la distanta, oprindu-se la fiecare colt ca sa se asigure ca nu il chem intr-o capcana. Cand am ajuns la bloc, s-a asezat la scari, privind spre geamurile intunecate ca si cum ar fi citit povesti nespuse. I-am lasat un castron improvizat din capacul cutiei mele de pranz si am turnat apa din sticla. In camera mea modesta, am aprins o veioza si m-am gandit la drumul pe care il parcurge uneori increderea: incepe cu o ezitare, continua cu o firimitura, se leaga de un pas comun si se odihneste langa o usa care poate candva se va deschide."
 
+# MINIMAL CHANGE 1:
+# Jetson-style fixed small char budgets per context (keeps prompt_eval_count relatively small/flat).
 make_prompt () {
-  local ctx="$1"
-  # generous character target so tokenized length ~= ctx (works with RO BPE)
-  local target_chars=$(( ctx * 30 ))   # ~30 chars/token heuristic
+  local ctx="$1" n_chars
+  case "$ctx" in
+    512)  n_chars=220  ;;
+    1024) n_chars=520  ;;
+    2048) n_chars=1200 ;;
+    4096) n_chars=2600 ;;
+    *)    n_chars=400  ;;
+  esac
   local text=""
-  while [[ ${#text} -lt $target_chars ]]; do text+="$BASE_PAR "; done
-  echo "${text:0:$target_chars}"
+  while [[ ${#text} -lt $n_chars ]]; do text+="$BASE_PAR "; done
+  echo "${text:0:$n_chars}"
 }
 
 # ---------- Helpers ----------
@@ -85,12 +93,19 @@ read_cpu_temp_once () {
   fi
 }
 
-# ---------- Warmup (quick, non-stream) ----------
+# ---------- Warmup ----------
 echo "[INFO] Warming up models…"
+# existing short warmup at 512 (UNCHANGED)
 for m in "${MODELS[@]}"; do
   curl -sS --connect-timeout 3 --max-time 5 "$HOST/api/generate" \
     -H "Content-Type: application/json" \
     -d '{"model":"'"$m"'","prompt":"warmup","stream":false,"options":{"num_ctx":512,"num_predict":4,"num_thread":2}}' >/dev/null || true
+done
+# MINIMAL CHANGE 2: add a 4k-context warmup to mirror Jetson behavior
+for m in "${MODELS[@]}"; do
+  curl -sS --connect-timeout 5 --max-time 8 "$HOST/api/generate" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"'"$m"'","prompt":"warmup 4k","stream":false,"options":{"num_ctx":4096,"num_predict":8,"num_thread":2}}' >/dev/null || true
 done
 echo "[INFO] Warmup done."
 
@@ -107,7 +122,6 @@ for model in "${MODELS[@]}"; do
           RESP_TMP=$(mktemp /tmp/ollama_resp_XXXXXX.jsonl)
           t0=$(date +%s.%N)
 
-          # Stream; NO --max-time here (Option A).
           curl -sS --http1.1 --no-buffer --connect-timeout 10 \
             "$HOST/api/generate" -H "Content-Type: application/json" \
             -d '{"model":"'"$model"'","prompt":'"$P_JSON"',"stream":true,"options":{"num_ctx":'"$ctx"',"num_predict":'"$pred"',"num_thread":'"$th"',"temperature":0.7,"top_p":0.9}}' \
@@ -124,7 +138,6 @@ for model in "${MODELS[@]}"; do
               }
             ' > "$RESP_TMP"
 
-          # Parse TTFT
           first_ts=$(awk '/^__FIRST__/ {print $2; exit}' "$RESP_TMP")
           if [[ -n "${first_ts:-}" ]]; then
             ttft_sec=$(awk -v a="$t0" -v b="$first_ts" 'BEGIN{printf("%.4f", b-a)}')
@@ -132,7 +145,6 @@ for model in "${MODELS[@]}"; do
             ttft_sec=""
           fi
 
-          # Final JSON (done:true)
           FINAL_JSON=$(tac "$RESP_TMP" | grep -m1 '"done":true' || true)
           if [[ -z "$FINAL_JSON" ]]; then
             echo "   → [WARN] missing done:true; skipping row"
@@ -141,7 +153,6 @@ for model in "${MODELS[@]}"; do
             continue
           fi
 
-          # Extract timings/tokens
           prompt_count=$(jq -r '.prompt_eval_count // 0' <<<"$FINAL_JSON")
           eval_count=$(jq -r '.eval_count // 0' <<<"$FINAL_JSON")
           p_dur=$(jq -r '.prompt_eval_duration // 0' <<<"$FINAL_JSON")
@@ -154,15 +165,12 @@ for model in "${MODELS[@]}"; do
           prompt_tps=$(awk -v c=$prompt_count -v s=$prompt_sec 'BEGIN{if(s>0) printf("%.2f", c/s); else print 0}')
           gen_tps=$(awk -v c=$eval_count   -v s=$gen_sec    'BEGIN{if(s>0) printf("%.2f", c/s); else print 0}')
 
-          # System stats
           read -r mem_rss_mb mem_hwm_mb <<< "$(get_mem_stats | tr ',' ' ')"
           sys_mem_avail_mb="$(get_sys_mem_avail_mb)"
           cpu_temp="$(read_cpu_temp_once || true)"
 
-          # Console summary
           echo "   → tokens: prompt=${prompt_count} gen=${eval_count} | TTFT=${ttft_sec:-NA}s | prompt_tps=${prompt_tps} | gen_tps=${gen_tps} | rss=${mem_rss_mb}MB | cpu≈${cpu_temp}°C"
 
-          # CSV row
           echo "$(date +%F_%T),$HOSTNAME,$SOC_LABEL,$OS_REL,$model,$rep,$th,$ctx,$pred,$prompt_count,$eval_count,$prompt_sec,$gen_sec,${ttft_sec:-},$total_sec,$prompt_tps,$gen_tps,$mem_rss_mb,$mem_hwm_mb,$sys_mem_avail_mb,$cpu_temp" >> "$CSV"
 
           rm -f "$RESP_TMP"
