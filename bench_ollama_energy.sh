@@ -8,7 +8,7 @@ HOST="${HOST:-http://127.0.0.1:11434}"
 # ----------------- Config -----------------
 MODELS=("nano-125m-q5" "nano-125m-f16" "nano-260m-q5" "nano-260m-f16")
 THREADS=(2 4)
-CTX=(512 1024 2048 4096)          # ← added 4096
+CTX=(512 1024 2048 4096)          # ← includes 4096
 PRED=(32 64 128)
 REPS=${REPS:-3}                   # repetitions per config
 IDLE_SECONDS=${IDLE_SECONDS:-3}   # per-run idle baseline
@@ -24,10 +24,10 @@ LONG_PROMPT="Intr-o seara ma intorceam de la munca si am vazut pe strada un cate
 prompt_for_ctx () {
   local ctx="$1" n_chars
   case "$ctx" in
-    512)  n_chars=220  ;;   # ~0.4–0.5 chars/token rule-of-thumb for RO BPE
+    512)  n_chars=220  ;;   # ~fixed slice per ctx (keeps work bounded)
     1024) n_chars=520  ;;
     2048) n_chars=1200 ;;
-    4096) n_chars=2600 ;;   # ← added longer slice for near-4k ctx
+    4096) n_chars=2600 ;;
     *)    n_chars=400  ;;
   esac
   printf "%s" "${LONG_PROMPT:0:n_chars}"
@@ -118,9 +118,15 @@ for model in "${MODELS[@]}"; do
   for th in "${THREADS[@]}"; do
     for ctx in "${CTX[@]}"; do
       for pred in "${PRED[@]}"; do
-        P="$(prompt_for_ctx "$ctx")"
+        base_p="$(prompt_for_ctx "$ctx")"
 
         for rep in $(seq 1 "$REPS"); do
+          # --------- CACHE OFF: per-run unique stamp + unique system ----------
+          STAMP=" [bench ${HOSTNAME} ${model} th=${th} ctx=${ctx} pred=${pred} rep=${rep} @$(date +%s%N)] "
+          P_JSON=$(jq -Rs . <<<"$STAMP$base_p")
+          SYS_JSON=$(jq -Rs . <<<"bench-$HOSTNAME th=$th ctx=$ctx pred=$pred rep=$rep $(date +%s%N)")
+          echo "[RUN] model=${model} rep=${rep} threads=${th} ctx=${ctx} pred=${pred} (cache=OFF stamp=$(printf '%s' "$STAMP" | sha1sum | cut -c1-12))"
+
           # Per-run idle baseline
           idle_w="$(idle_power_now)"
 
@@ -136,7 +142,8 @@ for model in "${MODELS[@]}"; do
           curl -sN "$HOST/api/generate" -X POST -H "Content-Type: application/json" \
             -d '{
               "model":"'"$model"'",
-              "prompt":"'"$P"'",
+              "system":'"$SYS_JSON"',
+              "prompt":'"$P_JSON"',
               "stream":true,
               "options":{"num_ctx":'"$ctx"',"num_predict":'"$pred"',"num_thread":'"$th"',"temperature":0.7,"top_p":0.9}
             }' | while IFS= read -r line; do
@@ -150,8 +157,6 @@ for model in "${MODELS[@]}"; do
           # Stop monitors
           kill "$TEGRA_PID" >/dev/null 2>&1 || true
           sleep 0.2
-
-          t1=$(date +%s.%N)
 
           # Parse final aggregate from the last JSON object in stream
           FINAL_JSON=$(tac "$RESP_TMP" | grep -m1 '"done":true' || true)
@@ -203,4 +208,3 @@ for model in "${MODELS[@]}"; do
 done
 
 echo "Results saved to $OUT"
-
