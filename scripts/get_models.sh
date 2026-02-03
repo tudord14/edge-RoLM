@@ -1,25 +1,15 @@
-#!/usr/bin/env bash
-# Download GGUF model files from a GitHub Release
-# Usage:
-#   bash scripts/get_models.sh [OUTDIR]
-# Environment overrides:
-#   REPO=tudord14/edge-RoLM   # owner/repo
-#   TAG=v1.0                  # release tag
-
 set -euo pipefail
 
 REPO="${REPO:-tudord14/edge-RoLM}"
 TAG="${TAG:-v1.0}"
 OUTDIR="${1:-models}"
 
-# ---- list your model filenames here ----
 FILES=(
   "Model-125M-f16.gguf"
   "Model-125M-Q5_K_M.gguf"
   "Model-350M-f16.gguf"
   "Model-350M-Q5_K_M.gguf"
 )
-# ----------------------------------------
 
 mkdir -p "$OUTDIR"
 
