@@ -1,18 +1,7 @@
-#!/usr/bin/env python3
-# edge_bench_llama.py
-# Benchmarks GGUF models with llama-cpp-python on Jetson devices (Nano/Xavier/Orin).
-# Records: prompt vs. decode timing, robust quantiles, integrated energy (raw & net of idle),
-# TTFT (including prompt eval), memory, temps, throttle flags, and key runtime knobs.
-
 import os, sys, time, csv, re, queue, threading, statistics as stats, socket, platform, subprocess
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import argparse
-
-# --- Dependencies ---
-# pip install llama-cpp-python psutil numpy
-# Optional: pip install nvidia-ml-py3
-# Jetson: tegrastats at /usr/bin/tegrastats
 
 try:
     import psutil
@@ -24,14 +13,12 @@ try:
 except Exception as e:
     print("llama-cpp-python is required: pip install llama-cpp-python", file=sys.stderr); raise
 
-# numpy is optional; used for robust percentiles if present
 try:
     import numpy as np
     NUMPY_OK = True
 except Exception:
     NUMPY_OK = False
 
-# NVML (rarely useful on Nano, but keep)
 NVML_OK = False
 try:
     import pynvml
@@ -42,16 +29,15 @@ except Exception:
 
 TEGRASTATS_PATH = "/usr/bin/tegrastats"
 
-# ------------------------- Tegrastats monitoring -------------------------
 
 @dataclass
 class TSamples:
-    t_sec: List[float] = field(default_factory=list)      # wall-clock seconds from start()
-    power_w: List[float] = field(default_factory=list)    # POM_5V_IN (W)
+    t_sec: List[float] = field(default_factory=list)      
+    power_w: List[float] = field(default_factory=list)    
     gpu_temp_c: List[float] = field(default_factory=list)
     cpu_temp_c: List[float] = field(default_factory=list)
     throttling: List[str] = field(default_factory=list)
-    vram_mb: List[float] = field(default_factory=list)    # rarely exposed
+    vram_mb: List[float] = field(default_factory=list)    
     ram_mb: List[float] = field(default_factory=list)
 
 class TegrastatsMonitor:
@@ -108,17 +94,15 @@ class TegrastatsMonitor:
 
     def _parse_line(self, line: str):
         now = time.time()
-        if self._t0 is None:  # should not happen
+        if self._t0 is None:  
             self._t0 = now
         t_rel = now - self._t0
-        # Power: POM_5V_IN X/Y (mW), take the instantaneous (X)
         m = re.search(r"POM_5V_IN\s+(\d+)\s*/\s*(\d+)", line)
         if m:
             mw_now = float(m.group(1))
             self.samples.t_sec.append(t_rel)
             self.samples.power_w.append(mw_now / 1000.0)
         else:
-            # still append time so arrays stay aligned if needed
             self.samples.t_sec.append(t_rel)
 
         # Temps
@@ -140,12 +124,11 @@ class TegrastatsMonitor:
             self.samples.throttling.append(line.strip())
 
 def integrate_energy(samples: TSamples) -> Optional[float]:
-    """Integrate power over time via trapezoidal rule to get Joules."""
     if not samples.power_w or len(samples.power_w) < 2:
         return None
     power = samples.power_w
     if not samples.t_sec or len(samples.t_sec) != len(power):
-        dt = 0.2  # default 200 ms
+        dt = 0.2  
         return sum(p * dt for p in power)
     energy = 0.0
     for i in range(1, len(power)):
@@ -163,8 +146,6 @@ def idle_power_tegra(duration_s: float = 30.0, interval_ms: int = 200) -> Option
     if mon.samples.power_w:
         return stats.fmean(mon.samples.power_w)
     return None
-
-# ------------------------- NVML helpers -------------------------
 
 def nvml_vram_mb() -> Optional[Tuple[float, float]]:
     if not NVML_OK:
@@ -197,10 +178,7 @@ def nvml_temp_c() -> Optional[float]:
     except Exception:
         return None
 
-# ------------------------- Prompt builder (exact input_ids) -------------------------
-
 def build_prompt_ids(llm: Llama, target_tokens: int) -> List[int]:
-    # Use a short seed and tile its token ids exactly to target length.
     seed = "Acesta este un prompt de test pentru evaluare. "
     seed_ids = llm.tokenize(seed.encode("utf-8"))
     toks: List[int] = []
@@ -208,20 +186,15 @@ def build_prompt_ids(llm: Llama, target_tokens: int) -> List[int]:
         toks.extend(seed_ids)
     return toks[:target_tokens]
 
-# ------------------------- Percentiles -------------------------
-
 def percentile(values: List[float], pct: float) -> float:
     if not values:
         return 0.0
     if NUMPY_OK:
         return float(np.percentile(np.array(values, dtype=float), pct))
-    # nearest-rank fallback
     vals = sorted(values)
     k = max(1, int(round((pct / 100.0) * len(vals))))
     k = min(k, len(vals))
     return float(vals[k-1])
-
-# ------------------------- Data structures -------------------------
 
 @dataclass
 class RunResult:
@@ -260,8 +233,6 @@ class RunResult:
     throttled: int
     notes: str = ""
 
-# ------------------------- Benchmark core -------------------------
-
 def run_benchmark(
     model_path: str,
     prompt_len: int,
@@ -282,7 +253,6 @@ def run_benchmark(
     quant = "Q5_K_M" if "Q5" in model_name.upper() else ("FP16" if "F16" in model_name.lower() or "FP16" in model_name.upper() else "UNKNOWN")
     hostname = socket.gethostname()
 
-    # Load model
     t0_load = time.time()
     llm = Llama(
         model_path=model_path,
@@ -293,30 +263,22 @@ def run_benchmark(
         vocab_only=False,
         use_mmap=True,
         n_threads=n_threads,
-        n_batch=n_batch,  # prompt KV batch size
+        n_batch=n_batch,
     )
     t_load = time.time() - t0_load
 
-    # Build prompt ids exactly
     input_ids = build_prompt_ids(llm, prompt_len)
-
-    # Warn if context not really stressed (for "4096" claims)
     if prompt_len < int(0.85 * n_ctx):
         print(f"[WARN] prompt_len={prompt_len} < 0.85*n_ctx ({n_ctx}). "
               f"Consider adding a 4096-length case for long-context claims.", file=sys.stderr)
 
-    # Warm-ups: cheap token & short prompt to page in
     llm("Ok.", max_tokens=1, temperature=0.0, top_p=1.0, echo=False)
     _ = llm(input_ids=input_ids[:128], max_tokens=0, temperature=0.0, top_p=1.0, echo=False, stream=False)
 
-    # -------- Prompt-only timing (non-stream, no generation) --------
     t0_prompt = time.time()
     _ = llm(input_ids=input_ids, max_tokens=0, temperature=0.0, top_p=1.0, echo=False, stream=False)
     prompt_time_s = time.time() - t0_prompt
     prompt_tps = (len(input_ids) / prompt_time_s) if prompt_time_s > 0 else 0.0
-
-    # -------- Decode (stream) with TTFT and token inter-arrival --------
-    # Start tegrastats monitor
     tegra = TegrastatsMonitor(interval_ms=tegra_interval_ms)
     tegra_started = tegra.start()
 
@@ -324,10 +286,9 @@ def run_benchmark(
     peak_rss_mb = proc.memory_info().rss / (1024*1024)
     ram_avg_accum = []
 
-    # NVML sampling (secondary on Jetsons)
     nvml_power_samples, nvml_temp_samples = [], []
 
-    timings = []            # inter-arrival seconds for tokens 2..N
+    timings = []           
     produced_tokens = 0
     first_token_ms = None
 
@@ -353,7 +314,6 @@ def run_benchmark(
         if produced_tokens > 1:
             timings.append(dt)
 
-        # memory (RSS), approximate average RAM via tegrastats (system-wide)
         try:
             rss = proc.memory_info().rss / (1024*1024)
             if rss > peak_rss_mb:
@@ -373,9 +333,7 @@ def run_benchmark(
                 nvml_temp_samples.append(t)
 
     total_time = time.time() - start
-    decode_time_s = total_time  # by construction
-
-    # Stop monitor
+    decode_time_s = total_time 
     tegra.stop()
 
     # Throughputs
@@ -402,13 +360,11 @@ def run_benchmark(
             net_energy = tegra_energy_j - (idle_baseline_w * duration)
             tegra_energy_per_tok_net_j = net_energy / produced_tokens
 
-    # NVML aggregates (optional)
     nvml_avg_power_w = (stats.fmean(nvml_power_samples) if nvml_power_samples else None)
     nvml_max_power_w = (max(nvml_power_samples) if nvml_power_samples else None)
     nvml_avg_gpu_temp_c = (stats.fmean(nvml_temp_samples) if nvml_temp_samples else None)
     nvml_max_gpu_temp_c = (max(nvml_temp_samples) if nvml_temp_samples else None)
 
-    # VRAM (often N/A on Nano)
     if NVML_OK:
         v = nvml_vram_mb()
         avg_vram_mb = v[0] if v else None
@@ -417,7 +373,6 @@ def run_benchmark(
         avg_vram_mb = None
         max_vram_mb = None
 
-    # Environment crumbs into notes (keeps header unchanged)
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     uname = " ".join(platform.uname())
     idle_str = (f"idle_w={idle_baseline_w:.2f}" if idle_baseline_w is not None else "idle_w=NA")
@@ -468,8 +423,6 @@ def run_benchmark(
         throttled=int(bool(tegra.samples.throttling)),
         notes=note_str
     )
-
-# ------------------------- Long-context stress -------------------------
 
 def long_context_stress(model_path: str, n_ctx: int, seed: int = 123) -> str:
     try:
@@ -550,7 +503,6 @@ def main():
                 print(f"[WARN] Model not found: {mp}")
                 continue
 
-            # Long-context smoke test
             stress = long_context_stress(mp, args.n_ctx)
             print(f"[STRESS] {os.path.basename(mp)} @ n_ctx={args.n_ctx}: {stress}")
 
@@ -598,8 +550,7 @@ def main():
                     f.flush()
                     time.sleep(args.cooldown)
 
-    print(f"\nDone. Wrote results to {args.out_csv}")
-    print("Tip: collect per-device CSVs (Nano/Pi/Phone) and aggregate by hostname for the paper.")
+    print(f"\ndone wrote results to {args.out_csv}")
 
 if __name__ == "__main__":
     main()
