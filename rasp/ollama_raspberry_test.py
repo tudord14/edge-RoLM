@@ -287,8 +287,8 @@ def main():
 
                     time.sleep(args.cooldown)
 
-    print(f"\n[DONE] Wrote results to {args.out_csv}")
-    print("Tip: tag results by hostname; aggregate across devices for your paper.")
+    print(f"\ndone wrote results to {args.out_csv}")
+    
 
 if __name__ == "__main__":
     main()
