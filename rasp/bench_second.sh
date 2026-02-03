@@ -1,8 +1,7 @@
-#!/usr/bin/env bash
 set -euo pipefail
 
-# ---------- Config ----------
-HOST="http://127.0.0.1:11434"   # hard-wire to avoid empty $HOST
+# -> config
+HOST="http://127.0.0.1:11434"  
 MODELS=("nano-125m-q5" "nano-125m-f16" "nano-260m-q5" "nano-260m-f16")
 THREADS=(2 4)
 CTX=(512 1024 2048 4096)
@@ -18,20 +17,18 @@ HOSTNAME="$(hostname)"
 export OLLAMA_NUM_GPU="${OLLAMA_NUM_GPU:-0}"
 export LC_ALL=C
 
-# ---------- Dependencies ----------
+# -> depends
 command -v jq     >/dev/null || { echo "jq missing: sudo apt-get install -y jq"; exit 1; }
 command -v curl   >/dev/null || { echo "curl missing"; exit 1; }
 command -v ollama >/dev/null || { echo "ollama missing in PATH"; exit 1; }
 command -v awk    >/dev/null || { echo "awk missing"; exit 1; }
 command -v date   >/dev/null || { echo "date missing"; exit 1; }
 
-# ---------- CSV ----------
 if [[ ! -f "$CSV" ]]; then
   echo "ts,host,soc,os,model,rep,num_thread,num_ctx,num_predict,prompt_tokens,gen_tokens,prompt_sec,gen_sec,ttft_sec,total_sec,prompt_tps,gen_tps,proc_rss_mb,proc_hwm_mb,sys_mem_avail_mb,cpu_temp_c" > "$CSV"
 fi
 echo "[INFO] CSV output: $CSV"
 
-# ---------- Ensure server ----------
 if ! pgrep -f "ollama serve" >/dev/null 2>&1; then
   echo "[INFO] Starting ollama serve…"
   nohup ollama serve -a 127.0.0.1:11434 >/dev/null 2>&1 &
@@ -46,12 +43,9 @@ for i in $(seq 1 60); do
   [[ $i -eq 60 ]] && { echo "[ERROR] Ollama did not become ready."; exit 1; }
 done
 
-# ---------- Fixed system & prompt text ----------
 FIXED_SYS="bench-stable v1; host=${HOSTNAME}; note=prompt-bytes-constant"
-
 BASE_PAR="Intr-o seara ma intorceam de la munca si am vazut pe strada un catel ud care se adapostea sub un chiosc inchis. Ploua marunt, iar luminile din vitrine se reflectau in balti, facand orasul sa para un film vechi. M-am oprit, am scos din rucsac o punga goala si am rupt un colt de paine pe care il pastrasem de la pranz. Catelul a ezitat, apoi s-a apropiat cu coada intre picioare, dar ochii ii scanteiau de curiozitate. In departare se auzea tramvaiul, iar pe trotuar treceau oameni cu pas grabit, neobservand micul spectacol al increderii care incerca sa se nasca intre doi straini. Mi-am pus haina pe umeri ca pe o manta improvizata si m-am aplecat. In clipa aceea, cineva a strigat din spatele meu ca ar fi mai bine sa nu ating animalul, ca poate musca. Dar vocea aceea parea mai mult o teama veche decat un avertisment. Catelul a luat firimiturile si s-a asezat la un pas, urmarindu-ma cu atentie. I-am intins palma goala, iar el, dupa cateva clipe, a mirosit-o si a tresarit, ca si cum si-ar fi amintit ca lumea poate fi blanda. Am zambit singur si mi-am dat seama ca nu eram grabit nicaieri, desi ceasul trecuse de noua. Am pornit incet spre casa, iar el m-a urmat la distanta, oprindu-se la fiecare colt ca sa se asigure ca nu il chem intr-o capcana. Cand am ajuns la bloc, s-a asezat la scari, privind spre geamurile intunecate ca si cum ar fi citit povesti nespuse. I-am lasat un castron improvizat din capacul cutiei mele de pranz si am turnat apa din sticla. In camera mea modesta, am aprins o veioza si m-am gandit la drumul pe care il parcurge uneori increderea: incepe cu o ezitare, continua cu o firimitura, se leaga de un pas comun si se odihneste langa o usa care poate candva se va deschide."
 
-# Keep deterministic slicing per ctx. We do NOT add any time-based stamps.
 make_prompt () {
   local ctx="$1" n_chars
   case "$ctx" in
@@ -66,7 +60,6 @@ make_prompt () {
   echo "${text:0:$n_chars}"
 }
 
-# ---------- Helpers ----------
 get_mem_stats () {
   local pid rss hwm
   pid=$(pgrep -f "ollama serve" | head -n1 || true)
@@ -93,7 +86,6 @@ read_cpu_temp_once () {
   fi
 }
 
-# ---------- Warmup ----------
 echo "[INFO] Warming up models…"
 for m in "${MODELS[@]}"; do
   curl -sS --connect-timeout 3 --max-time 5 "$HOST/api/generate" \
@@ -107,7 +99,6 @@ for m in "${MODELS[@]}"; do
 done
 echo "[INFO] Warmup done."
 
-# ---------- Main ----------
 for model in "${MODELS[@]}"; do
   for th in "${THREADS[@]}"; do
     for ctx in "${CTX[@]}"; do
@@ -121,7 +112,7 @@ for model in "${MODELS[@]}"; do
           RESP_TMP=$(mktemp /tmp/ollama_resp_XXXXXX.jsonl)
           t0=$(date +%s.%N)
 
-          # NOTE: keep_alive:0 prevents KV cache carryover; seed fixed for repeatability.
+          # -> keep_alive:0 prevents KV cache carryover
           curl -sS --http1.1 --no-buffer --connect-timeout 10 --max-time 240 \
             "$HOST/api/generate" -H "Content-Type: application/json" \
             -d '{"model":"'"$model"'","system":'"$SYS_JSON"',"prompt":'"$P_JSON"',"stream":true,"keep_alive":0,"options":{"num_ctx":'"$ctx"',"num_predict":'"$pred"',"num_thread":'"$th"',"temperature":0.7,"top_p":0.9,"seed":42}}' \
@@ -169,7 +160,7 @@ for model in "${MODELS[@]}"; do
           sys_mem_avail_mb="$(get_sys_mem_avail_mb)"
           cpu_temp="$(read_cpu_temp_once || true)"
 
-          echo "   → tokens: prompt=${prompt_count} gen=${eval_count} | TTFT=${ttft_sec:-NA}s | prompt_tps=${prompt_tps} | gen_tps=${gen_tps} | rss=${mem_rss_mb}MB | cpu≈${cpu_temp}°C"
+          echo "  -> tokens: prompt=${prompt_count} gen=${eval_count} | TTFT=${ttft_sec:-NA}s | prompt_tps=${prompt_tps} | gen_tps=${gen_tps} | rss=${mem_rss_mb}MB | cpu≈${cpu_temp}°C"
 
           echo "$(date +%F_%T),$HOSTNAME,$SOC_LABEL,$OS_REL,$model,$rep,$th,$ctx,$pred,$prompt_count,$eval_count,$prompt_sec,$gen_sec,${ttft_sec:-},$total_sec,$prompt_tps,$gen_tps,$mem_rss_mb,$mem_hwm_mb,$sys_mem_avail_mb,$cpu_temp" >> "$CSV"
 
