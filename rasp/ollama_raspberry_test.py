@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-# edge_bench_llama_pi.py
-# Raspberry Pi benchmark for GGUF models using llama-cpp-python.
-# Records: TTFT, prompt vs. decode timing, robust quantiles, process RSS,
-# and CPU temperature (via vcgencmd or /sys). No Jetson tegrastats/NVML.
-
 import os, sys, time, csv, socket, platform, statistics as stats, subprocess
 from dataclasses import dataclass
 from typing import List, Optional
