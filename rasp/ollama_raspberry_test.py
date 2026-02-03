@@ -281,7 +281,7 @@ def main():
                     ])
                     f.flush()
 
-                    print(f"   → tokens: prompt={res.prompt_tokens}, gen={res.new_tokens} | "
+                    print(f"   -> tokens: prompt={res.prompt_tokens}, gen={res.new_tokens} | "
                           f"TTFT={res.ttft_ms:.0f} ms | gen_tps_overall={res.decode_tps_overall:.2f} | "
                           f"RSS={res.peak_rss_mb:.0f} MB | CPU≈{(res.avg_cpu_temp_c or 0):.1f}°C")
 
