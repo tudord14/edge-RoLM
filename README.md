@@ -1,5 +1,7 @@
 # *Edge-Ready Romanian Language Models: Training, Quantization & Deployment*
 
+https://www.mdpi.com/2673-2688/7/2/61
+
 In the _nano_ folder we have scripts for conducting experiment runs on the Jetson Nano 4GB:  
 - **bench_ollama_energy.sh** -- a bash script for running the full grid of tests
 - **nano_ollama_run.py** -- the python script for running the models
